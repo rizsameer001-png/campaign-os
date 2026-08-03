@@ -1,0 +1,17 @@
+{
+  "name": "election-campaign-os",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev:backend": "npm run dev --workspace=apps/backend",
+    "dev:frontend": "npm run dev --workspace=apps/frontend",
+    "build:frontend": "npm run build --workspace=apps/frontend",
+    "prisma:generate": "npm run prisma:generate --workspace=apps/backend",
+    "prisma:migrate": "npm run prisma:migrate --workspace=apps/backend",
+    "prisma:migrate:dev": "npm run prisma:migrate:dev --workspace=apps/backend",
+    "prisma:seed": "npm run prisma:seed --workspace=apps/backend"
+  }
+}

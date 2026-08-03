@@ -1,0 +1,12 @@
+{
+  "name": "@election-os/shared",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "main": "constants/roles.js",
+  "exports": {
+    "./roles": "./constants/roles.js",
+    "./scoring-weights": "./constants/scoring-weights.js",
+    "./budget-split": "./constants/budget-split.js"
+  }
+}

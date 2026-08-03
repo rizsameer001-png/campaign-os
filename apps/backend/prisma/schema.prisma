@@ -1,0 +1,571 @@
+// ============================================================================
+// AI-Powered Election Campaign OS — Prisma Schema
+// DB: PostgreSQL 18 (Neon or Supabase) | ORM: Prisma
+// PK strategy: uuidv7() — time-ordered UUIDs, native to PG 18
+// Flexible/semi-structured fields use Json (JSONB under the hood)
+// ============================================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  // Pooled connection (via PgBouncer on Neon, or Supavisor on Supabase) — used at runtime
+  url       = env("DATABASE_URL")
+  // Direct, non-pooled connection — required by Prisma for migrations/introspection
+  directUrl = env("DIRECT_URL")
+}
+
+// ----------------------------------------------------------------------------
+// ENUMS
+// ----------------------------------------------------------------------------
+
+enum Role {
+  super_admin
+  admin
+  candidate
+  volunteer
+}
+
+enum UserStatus {
+  pending_approval
+  active
+  suspended
+  banned
+  deleted
+}
+
+enum ElectionType {
+  assembly
+  general
+  local
+}
+
+enum PlanStatus {
+  draft
+  active
+  completed
+  archived
+}
+
+enum TaskPriority {
+  low
+  medium
+  high
+}
+
+enum TaskStatus {
+  pending
+  in_progress
+  completed
+}
+
+enum AttendanceStatus {
+  present
+  absent
+  late
+}
+
+enum AiToolType {
+  speech
+  manifesto
+  social
+  opposition
+  campaign_plan
+  readiness_analysis
+}
+
+enum AiUsageStatus {
+  success
+  error
+  quota_blocked
+}
+
+enum LeadStatus {
+  new
+  contacted
+  qualified
+  lost
+  converted
+}
+
+enum LeadSource {
+  contact_form
+  service_inquiry
+  demo_request
+  email_campaign
+  referral
+}
+
+enum NotificationType {
+  info
+  success
+  warning
+  error
+}
+
+enum VolunteerStatus {
+  pending
+  approved
+  rejected
+  inactive
+}
+
+// ----------------------------------------------------------------------------
+// AUTH & USERS
+// ----------------------------------------------------------------------------
+
+model User {
+  id               String     @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  name             String
+  email            String     @unique
+  phone            String     @unique
+  passwordHash     String     @map("password_hash")
+  role             Role       @default(candidate)
+  status           UserStatus @default(pending_approval)
+  state            String?
+  constituencyId   String?    @map("constituency_id") @db.Uuid
+  // Raw text captured at registration (AUTH-C-001) before an admin/candidate
+  // resolves it to an actual Constituency row via constituencyId — keeps
+  // registration decoupled from the constituencies table being pre-seeded.
+  constituencyName String?    @map("constituency_name")
+  party            String?
+  // AUTH-A-003: TOTP secret for admin 2FA. Encrypt at the application layer
+  // before writing in production; column name reflects that expectation.
+  totpSecretEncrypted String? @map("totp_secret_encrypted")
+  // AUTH-CL-007: forgot/reset password flow
+  passwordResetTokenHash String?   @map("password_reset_token_hash")
+  passwordResetExpiresAt DateTime? @map("password_reset_expires_at")
+  profilePhotoUrl  String?    @map("profile_photo_url")
+  profilePhotoId   String?    @map("profile_photo_public_id") // Cloudinary public_id, for deletion
+  // JSONB: flexible, evolving shape (twitter/facebook/instagram/whatsapp links etc.)
+  socialLinks      Json?      @map("social_links") @db.JsonB
+  // NCS-006: { email: boolean, sms: boolean } — defaults applied in app code, not DB.
+  notificationPreferences Json? @map("notification_preferences") @db.JsonB
+  bio              String?
+  slug             String?    @unique // for /candidate/:slug public profile
+  profileVisibility Boolean   @default(false) @map("profile_visibility")
+  emailVerified    Boolean    @default(false) @map("email_verified")
+  phoneVerified    Boolean    @default(false) @map("phone_verified")
+  failedLoginCount Int        @default(0) @map("failed_login_count")
+  lockedUntil      DateTime?  @map("locked_until")
+
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+  deletedAt DateTime? @map("deleted_at")
+
+  constituency     Constituency?     @relation(fields: [constituencyId], references: [id])
+  invitedByUserId  String?           @map("invited_by_user_id") @db.Uuid // candidate who invited this volunteer
+
+  refreshTokens    RefreshToken[]
+  auditLogs        AuditLog[]
+  readinessInputs  ReadinessInput[]
+  readinessReports ReadinessReport[]
+  campaignPlans    CampaignPlan[]
+  campaignMetrics  CampaignMetric[]
+  volunteerProfile Volunteer?        @relation("VolunteerUser")
+  volunteersOwned  Volunteer[]       @relation("CandidateVolunteers")
+  tasksCreated     Task[]            @relation("TaskCreator")
+  aiUsageLogs      AiUsageLog[]
+  notifications    Notification[]
+  leadsAssigned    Lead[]            @relation("LeadAssignee")
+  rallyReports     RallyReport[]     @relation("RallyReportCandidate")
+
+  @@index([email])
+  @@index([role])
+  @@index([status])
+  @@map("users")
+}
+
+model RefreshToken {
+  id                String   @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  userId            String   @map("user_id") @db.Uuid
+  tokenHash         String   @map("token_hash")
+  deviceFingerprint String?  @map("device_fingerprint")
+  ipAddress         String?  @map("ip_address")
+  userAgent         String?  @map("user_agent")
+  expiresAt         DateTime @map("expires_at")
+  createdAt         DateTime @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("refresh_tokens")
+}
+
+model AuditLog {
+  id         String   @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  userId     String?  @map("user_id") @db.Uuid
+  action     String // e.g. "user.suspend", "constituency.update"
+  entityType String   @map("entity_type")
+  entityId   String?  @map("entity_id") @db.Uuid
+  // JSONB diff snapshots — schema varies per entity, so Json is appropriate here
+  oldValues  Json?    @map("old_values") @db.JsonB
+  newValues  Json?    @map("new_values") @db.JsonB
+  ipAddress  String?  @map("ip_address")
+  userAgent  String?  @map("user_agent")
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  user User? @relation(fields: [userId], references: [id])
+
+  @@index([userId])
+  @@index([entityType, entityId])
+  @@index([createdAt])
+  @@map("audit_logs")
+}
+
+// ----------------------------------------------------------------------------
+// ELECTION READINESS ENGINE
+// ----------------------------------------------------------------------------
+
+model ReadinessInput {
+  id                String       @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  userId            String       @map("user_id") @db.Uuid
+  state             String
+  constituency      String
+  electionType      ElectionType @map("election_type")
+  budget            BigInt // stored in paise/smallest unit to avoid float issues
+  party             String?
+  socialMediaScore  Int          @map("social_media_score") // 1-10
+  volunteerCount    Int          @map("volunteer_count")
+  pastVictory       Boolean      @map("past_victory")
+  pastVictoryDetails String?     @map("past_victory_details")
+  // JSONB: holds any extra/experimental input fields without a migration
+  // (e.g. auto-fetched follower counts, linked social account metadata)
+  extra             Json?        @db.JsonB
+  version           Int          @default(1)
+  isDraft           Boolean      @default(false) @map("is_draft")
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  user    User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  reports ReadinessReport[]
+
+  @@index([userId])
+  @@map("readiness_inputs")
+}
+
+model ReadinessReport {
+  id                String   @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  userId            String   @map("user_id") @db.Uuid
+  inputId           String   @map("input_id") @db.Uuid
+  overallScore      Int      @map("overall_score")
+  organizationScore Int      @map("organization_score")
+  digitalScore      Int      @map("digital_score")
+  resourcesScore    Int      @map("resources_score")
+  voterScore        Int      @map("voter_score")
+  visibilityScore   Int      @map("visibility_score")
+  strengths         String[]
+  weaknesses        String[]
+  recommendations   String[]
+  // JSONB: raw AI analysis payload (sentiment inputs, competitor snapshot, etc.)
+  // kept alongside the structured columns above for audit/debugging without
+  // needing a schema change every time the AI output shape evolves
+  aiAnalysisRaw     Json?    @map("ai_analysis_raw") @db.JsonB
+  publicShareToken  String?  @unique @map("public_share_token")
+  publicShareExpiresAt DateTime? @map("public_share_expires_at")
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  user  User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  input ReadinessInput @relation(fields: [inputId], references: [id])
+
+  @@index([userId])
+  @@map("readiness_reports")
+}
+
+// ----------------------------------------------------------------------------
+// CONSTITUENCY INTELLIGENCE
+// ----------------------------------------------------------------------------
+
+model Constituency {
+  id                   String   @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  name                 String
+  state                String
+  population           Int
+  genderRatio          Float    @map("gender_ratio")
+  literacyRate         Float    @map("literacy_rate")
+  urbanPercent         Float    @map("urban_percent")
+  pastWinner           String?  @map("past_winner")
+  pastWinnerParty      String?  @map("past_winner_party")
+  victoryMarginVotes   Int?     @map("victory_margin_votes")
+  victoryMarginPercent Float?   @map("victory_margin_percent")
+  // JSONB: caste/religion demographics — varies by state/data source availability,
+  // and last-3-elections history — irregular shape, doesn't warrant a join table yet
+  demographics         Json?    @db.JsonB
+  electionHistory      Json?    @map("election_history") @db.JsonB
+  dataSource           String?  @map("data_source") // e.g. "ECI", "Census 2021"
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  users User[]
+
+  @@unique([name, state])
+  @@index([state])
+  @@map("constituencies")
+}
+
+// ----------------------------------------------------------------------------
+// CAMPAIGN PLANNING
+// ----------------------------------------------------------------------------
+
+model CampaignPlan {
+  id                String       @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  userId            String       @map("user_id") @db.Uuid
+  title             String
+  budget            BigInt
+  electionType      ElectionType @map("election_type")
+  state             String
+  constituency      String
+  daysUntilElection Int          @map("days_until_election")
+  // JSONB: the week-by-week plan structure (theme, activities, budget allocation,
+  // digital/ground actions, milestones) — inherently nested/variable, ideal for JSONB
+  planData          Json         @map("plan_data") @db.JsonB
+  status            PlanStatus   @default(draft)
+  version           Int          @default(1)
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("campaign_plans")
+}
+
+// ----------------------------------------------------------------------------
+// LIVE CAMPAIGN METRICS
+// ----------------------------------------------------------------------------
+
+model CampaignMetric {
+  id              String   @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  userId          String   @map("user_id") @db.Uuid
+  volunteersActive Int     @map("volunteers_active")
+  boothsCovered   Float    @map("booths_covered") // percentage
+  sentimentScore  Float    @map("sentiment_score") // -100 to +100
+  surveyCount     Int      @map("survey_count")
+  socialReach     BigInt   @map("social_reach")
+  fundsUtilized   Float    @map("funds_utilized") // percentage
+  metricDate      DateTime @map("metric_date") @db.Date
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, metricDate]) // one row per candidate per day — enables MERGE-style upsert
+  @@index([userId, metricDate])
+  @@map("campaign_metrics")
+}
+
+// ----------------------------------------------------------------------------
+// VOLUNTEER MANAGEMENT
+// ----------------------------------------------------------------------------
+
+model Volunteer {
+  id            String          @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  userId        String          @unique @map("user_id") @db.Uuid
+  candidateId   String          @map("candidate_id") @db.Uuid
+  name          String
+  phone         String
+  email         String
+  address       String?
+  assignedBooth String?         @map("assigned_booth")
+  status        VolunteerStatus @default(pending)
+  invitedByEmail String?        @map("invited_by_email") // audit trail for invite flow
+
+  joinedAt  DateTime @default(now()) @map("joined_at")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  user      User           @relation("VolunteerUser", fields: [userId], references: [id], onDelete: Cascade)
+  candidate User           @relation("CandidateVolunteers", fields: [candidateId], references: [id], onDelete: Cascade)
+  tasks     Task[]
+  boothReports BoothReport[]
+  attendance   Attendance[]
+  rallyReports RallyReport[] @relation("RallyReportVolunteer")
+
+  @@index([candidateId])
+  @@map("volunteers")
+}
+
+model Task {
+  id               String       @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  candidateId      String       @map("candidate_id") @db.Uuid
+  volunteerId      String?      @map("volunteer_id") @db.Uuid
+  title            String
+  description      String?
+  assignedBooth    String?      @map("assigned_booth")
+  priority         TaskPriority @default(medium)
+  status           TaskStatus   @default(pending)
+  dueDate          DateTime?    @map("due_date")
+  completionNotes  String?      @map("completion_notes")
+  completionPhotos String[]     @map("completion_photos") // Cloudinary secure_urls
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  candidate User       @relation("TaskCreator", fields: [candidateId], references: [id], onDelete: Cascade)
+  volunteer Volunteer? @relation(fields: [volunteerId], references: [id])
+
+  @@index([candidateId])
+  @@index([volunteerId])
+  @@map("tasks")
+}
+
+model BoothReport {
+  id               String   @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  volunteerId      String   @map("volunteer_id") @db.Uuid
+  boothId          String   @map("booth_id")
+  turnoutEstimate  Int?     @map("turnout_estimate")
+  issuesReported   String?  @map("issues_reported")
+  photos           String[] // Cloudinary secure_urls
+  // JSONB point-like value stored as {lat, lng} for simplicity/portability
+  // (use PostGIS `geography(Point)` instead if map/radius queries are needed later)
+  geolocation      Json?    @db.JsonB
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  volunteer Volunteer @relation(fields: [volunteerId], references: [id], onDelete: Cascade)
+
+  @@index([volunteerId])
+  @@index([boothId])
+  @@map("booth_reports")
+}
+
+model Attendance {
+  id          String           @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  volunteerId String           @map("volunteer_id") @db.Uuid
+  date        DateTime         @db.Date
+  status      AttendanceStatus
+  checkIn     DateTime?        @map("check_in")
+  checkOut    DateTime?        @map("check_out")
+  geolocation Json?            @db.JsonB
+  isLocked    Boolean          @default(false) @map("is_locked") // immutable after 24h (VMS-A-002)
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  volunteer Volunteer @relation(fields: [volunteerId], references: [id], onDelete: Cascade)
+
+  @@unique([volunteerId, date])
+  @@index([volunteerId, date])
+  @@map("attendance")
+}
+
+model RallyReport {
+  id            String   @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  volunteerId   String   @map("volunteer_id") @db.Uuid
+  candidateId   String   @map("candidate_id") @db.Uuid
+  rallyName     String   @map("rally_name")
+  location      String
+  crowdEstimate Int?     @map("crowd_estimate")
+  photos        String[] // Cloudinary secure_urls, max 5 enforced at API layer
+  issuesFaced   String?  @map("issues_faced")
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  volunteer Volunteer @relation("RallyReportVolunteer", fields: [volunteerId], references: [id], onDelete: Cascade)
+  candidate User      @relation("RallyReportCandidate", fields: [candidateId], references: [id], onDelete: Cascade)
+
+  @@index([candidateId])
+  @@map("rally_reports")
+}
+
+// ----------------------------------------------------------------------------
+// AI USAGE TRACKING
+// ----------------------------------------------------------------------------
+
+model AiUsageLog {
+  id           String        @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  userId       String        @map("user_id") @db.Uuid
+  toolType     AiToolType    @map("tool_type")
+  inputTokens  Int           @map("input_tokens")
+  outputTokens Int           @map("output_tokens")
+  costInr      Float         @map("cost_inr")
+  status       AiUsageStatus @default(success)
+  errorMessage String?       @map("error_message")
+  // JSONB: raw request/response metadata for debugging (model name, latency, etc.)
+  metadata     Json?         @db.JsonB
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+  @@index([toolType])
+  @@map("ai_usage_logs")
+}
+
+// ----------------------------------------------------------------------------
+// PUBLIC / CRM
+// ----------------------------------------------------------------------------
+
+model Lead {
+  id              String     @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  name            String
+  email           String
+  phone           String?
+  source          LeadSource
+  serviceInterest String?    @map("service_interest")
+  message         String?
+  status          LeadStatus @default(new)
+  assignedTo      String?    @map("assigned_to") @db.Uuid
+  notes           String?
+  convertedUserId String?    @map("converted_user_id") @db.Uuid // set on AD-L-005 conversion
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  assignee User? @relation("LeadAssignee", fields: [assignedTo], references: [id])
+
+  @@index([status])
+  @@map("leads")
+}
+
+model Service {
+  id          String   @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  title       String
+  description String
+  category    String // Campaign Strategy | Digital Campaigning | Ground Operations | Political Intelligence
+  features    String[]
+  priceInfo   String?  @map("price_info")
+  isActive    Boolean  @default(true) @map("is_active")
+  slug        String   @unique
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@map("services")
+}
+
+model Notification {
+  id       String           @id @default(dbgenerated("uuidv7()")) @db.Uuid
+  userId   String           @map("user_id") @db.Uuid
+  type     NotificationType @default(info)
+  title    String
+  message  String
+  isRead   Boolean          @default(false) @map("is_read")
+  // JSONB: arbitrary payload (e.g. { taskId, boothId } for deep-linking on click)
+  metadata Json?            @db.JsonB
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, isRead])
+  @@map("notifications")
+}
+
+// AD-S-001..008: platform settings as a key/value store, so new settings
+// don't require a migration — the settings *screen* validates known keys,
+// the DB just holds whatever's there.
+model SystemSetting {
+  key       String   @id
+  value     Json     @db.JsonB
+  updatedAt DateTime @updatedAt @map("updated_at")
+  updatedBy String?  @map("updated_by") @db.Uuid
+
+  @@map("system_settings")
+}
