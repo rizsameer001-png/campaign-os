@@ -6,3 +6,24 @@ coverage/
 *.log
 .env*
 !.env.example
+Logs
+
+*.log
+
+Archives
+
+*.zip
+*.rar
+*.7z
+*.tar
+*.gz
+
+System files
+
+.DS_Store
+Thumbs.db
+
+Editor / IDE
+
+.vscode/
+.idea/
