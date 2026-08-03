@@ -10,6 +10,11 @@ Logs
 
 *.log
 
+private.pem
+public.pem
+*_base64.txt
+*.pem
+
 Archives
 
 *.zip
